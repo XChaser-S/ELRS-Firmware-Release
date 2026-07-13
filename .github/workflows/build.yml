@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 0 * * *' # 第一次每天 UTC 时间 0:00 运行，即北京时间早上 8:00
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: '指定 ELRS 版本（留空表示自动检测最新版本，如 v3.3.2）'
+        required: false
+        default: ''
   
 jobs:
   check_release:
@@ -39,28 +44,36 @@ jobs:
           import os
           from datetime import datetime, timedelta
 
-          url = 'https://api.github.com/repos/ExpressLRS/ExpressLRS/releases/latest'
-          response = requests.get(url)
-          release = response.json()
-          
-          tag_name = release['tag_name']
-          os.system(f'echo \"tag_name={tag_name}\" >> \$GITHUB_OUTPUT')
-          
-          release_date_str = release['published_at']
-          release_date = datetime.strptime(release_date_str, '%Y-%m-%dT%H:%M:%SZ')
-          beijing_time = release_date + timedelta(hours=8)
-
-          print('最新的Release：', tag_name, '  发布于北京时间：', beijing_time.strftime('%Y-%m-%d %H:%M:%S'))
-
-          now = datetime.utcnow()
-          elapsed_time = now - release_date
-
-          if elapsed_time <= timedelta(hours=24):
-            print('最近24小时内有新的Release：', tag_name, '  即将开始编译最新版本固件！')
+          # 如果手动输入了版本，直接使用该版本
+          manual_version = '${{ github.event.inputs.release_version }}'.strip()
+          if manual_version:
+            print(f'📌 使用手动指定的版本: {manual_version}')
+            os.system(f'echo \"tag_name={manual_version}\" >> \$GITHUB_OUTPUT')
             os.system('echo \"has_new_version=true\" >> \$GITHUB_OUTPUT')
           else:
-            print('最近24小时内没有新的Release，即将退出！(手动运行时请忽略)')
-            os.system('echo \"has_new_version=false\" >> \$GITHUB_OUTPUT')
+            # 否则自动检测最新版本
+            url = 'https://api.github.com/repos/ExpressLRS/ExpressLRS/releases/latest'
+            response = requests.get(url)
+            release = response.json()
+            
+            tag_name = release['tag_name']
+            os.system(f'echo \"tag_name={tag_name}\" >> \$GITHUB_OUTPUT')
+            
+            release_date_str = release['published_at']
+            release_date = datetime.strptime(release_date_str, '%Y-%m-%dT%H:%M:%SZ')
+            beijing_time = release_date + timedelta(hours=8)
+
+            print('最新的Release：', tag_name, '  发布于北京时间：', beijing_time.strftime('%Y-%m-%d %H:%M:%S'))
+
+            now = datetime.utcnow()
+            elapsed_time = now - release_date
+
+            if elapsed_time <= timedelta(hours=24):
+              print('最近24小时内有新的Release：', tag_name, '  即将开始编译最新版本固件！')
+              os.system('echo \"has_new_version=true\" >> \$GITHUB_OUTPUT')
+            else:
+              print('最近24小时内没有新的Release，即将退出！(手动运行时请忽略)')
+              os.system('echo \"has_new_version=false\" >> \$GITHUB_OUTPUT')
           "
 
   targets:
@@ -78,16 +91,14 @@ jobs:
           ref: ${{ needs.check_release.outputs.tag_name }}
       - id: set-targets
         run: |
-          # 提取所有 UART 和 STLINK 目标，清理格式后转换为 JSON 数组
+          # 提取所有 targets（包括 UART, STLINK, SPI, I2C 等），并排除 DEPRECATED
           TARGETS=$(
             {
-              grep '^\[env:.*UART\]' src/targets/unified.ini 2>/dev/null || true
-              grep -r '^\[env:.*STLINK\]' src/targets/ 2>/dev/null | cut -d: -f2 || true
+              grep '^\[env:' src/targets/unified.ini 2>/dev/null | sed 's/\[env://;s/\]//' || true
+              grep -r '^\[env:' src/targets/*.ini 2>/dev/null | sed 's/.*\[env://;s/\]//' || true
             } | \
-            sed 's/^\[env://g' | \
-            sed 's/\]$//g' | \
             grep -v '^$' | \
-            grep -v '^\[' | \
+            grep -v DEPRECATED | \
             sort -u | \
             awk 'BEGIN{ORS=""} NR==1{printf "[\"%s\"", $0} NR>1{printf ", \"%s\"", $0} END{print "]"}'
           )
@@ -220,30 +231,65 @@ jobs:
       contents: write
     
     steps:
+      - name: 下载最新 ELRS 代码
+        uses: actions/checkout@v4
+        with:
+          repository: ExpressLRS/ExpressLRS
+          fetch-depth: 0
+          ref: ${{ needs.check_release.outputs.tag_name }}
+
+      - name: 获取固件
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: 获取硬件目录
+        uses: actions/checkout@v4
+        with:
+          repository: ExpressLRS/targets
+          fetch-depth: 0
+          path: src/hardware
+
+      - name: 复制硬件配置文件到文件夹
+        run: cp -r src/hardware dist/firmware
+
+      - name: 复制 Lua 脚本到文件夹
+        run: |
+          mkdir -p dist/firmware/lua
+          cp -r src/lua/elrsV3.lua dist/firmware/lua
+
+      - name: 复制 bootloader 到文件夹
+        run: cd src ; find bootloader -name \*.bin -o -name \*.frk | grep -v src/ | cpio -pdm ../dist/firmware
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 用 shiv 编译挂件刷写进制文件
+        run: |
+          cd src/python
+          pip install shiv
+          shiv -c flash -o ../../dist/firmware/flasher.pyz pyserial .
+      
+      - name: 上传固件到 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-complete
+          path: dist/**/*
+
       - name: 下载此仓库代码
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 获取固件（下载本次运行的所有 artifact）
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: 创建固件目录结构并复制产物
+      - name: 创建固件压缩包
         run: |
-          TAG=${{ needs.check_release.outputs.tag_name }}
-          mkdir -p releases/${TAG}
-          # actions/download-artifact 会将每个 artifact 放到 dist/<artifact-name>/ 下，直接拷贝 dist/* 到 releases 下
-          cp -r dist/* releases/${TAG}/ || true
-
-      - name: 打包固件为单个 zip 文件
-        run: |
-          TAG=${{ needs.check_release.outputs.tag_name }}
+          mkdir -p releases/${{ needs.check_release.outputs.tag_name }}
+          cp -r dist/firmware releases/${{ needs.check_release.outputs.tag_name }}/
           cd releases
-          # 确保压缩输出在工作区根，供后续 release 上传使用
-          zip -r -9 ../${TAG}_firmware.zip ./${TAG}
-
+          zip -r -9 ../${{ needs.check_release.outputs.tag_name }}_firmware.zip ./${{ needs.check_release.outputs.tag_name }}
+      
       - name: 提交并推送编译结果到仓库
         run: |
           git config --local user.email "action@github.com"
@@ -258,7 +304,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.check_release.outputs.tag_name }}
-          files: releases_archive/${{ needs.check_release.outputs.tag_name }}_firmware.zip  # ← 修改这行
+          files: releases_archive/${{ needs.check_release.outputs.tag_name }}_firmware.zip
           generate_release_notes: true
           draft: false
           prerelease: false
