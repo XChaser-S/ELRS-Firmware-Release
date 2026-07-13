@@ -81,17 +81,25 @@ jobs:
           # 提取所有 UART 和 STLINK 目标，清理格式后转换为 JSON 数组
           TARGETS=$(
             {
-              grep '\[env:.*UART\]' src/targets/unified.ini || true
-              grep -r '\[env:.*STLINK\]' src/targets/ | cut -d: -f2 || true
+              grep '^\[env:.*UART\]' src/targets/unified.ini 2>/dev/null || true
+              grep -r '^\[env:.*STLINK\]' src/targets/ 2>/dev/null | cut -d: -f2 || true
             } | \
-            sed 's/.*\[env://g' | \
-            sed 's/\].*//g' | \
+            sed 's/^\[env://g' | \
+            sed 's/\]$//g' | \
             grep -v '^$' | \
+            grep -v '^\[' | \
             sort -u | \
             awk 'BEGIN{ORS=""} NR==1{printf "[\"%s\"", $0} NR>1{printf ", \"%s\"", $0} END{print "]"}'
           )
-                    
+          
+          # 验证提取结果
+          if [ -z "$TARGETS" ] || [ "$TARGETS" = "[]" ]; then
+            echo "❌ 无法提取有效的目标环境"
+            exit 1
+          fi
+          
           echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
+          echo "✅ 成功提取目标: ${TARGETS}"
           
   build:
     needs: [check_release, targets]
@@ -138,6 +146,15 @@ jobs:
           cd src
           platformio pkg install --platform native
           platformio pkg update
+
+          # 验证目标环境是否有效
+          VALID_TARGETS=$(platformio env list | grep -v '^\[' | awk '{print $1}' | tr '\n' '|' | sed 's/|$//')
+          
+          if ! echo "${{ matrix.target }}" | grep -qE "^($VALID_TARGETS)$"; then
+            echo "⚠️  跳过无效的环境: ${{ matrix.target }}"
+            exit 0
+          fi
+          
           case ${{matrix.target}} in
             *2400* | FM30*)
               # release builds
