@@ -142,7 +142,8 @@ jobs:
           
       - name: 编译固件
         run: |
-          mkdir -p ~/artifacts/firmware
+          # 使用工作区路径保存产物，避免 ~ 展开问题
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/firmware"
           cd src
           platformio pkg install --platform native
           platformio pkg update
@@ -157,32 +158,46 @@ jobs:
           
           case ${{matrix.target}} in
             *2400* | FM30*)
-              # release builds
+              # release builds (LBT & FCC)
               PLATFORMIO_BUILD_FLAGS="-DRegulatory_Domain_EU_CE_2400" pio run -e ${{ matrix.target }}
-              OUTDIR=~/artifacts/firmware/LBT/`echo ${{ matrix.target }} | sed s/_via.*//`
-              mkdir -p $OUTDIR
-              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} $OUTDIR >& /dev/null || :
+              OUTDIR="$GITHUB_WORKSPACE/artifacts/firmware/LBT/$(echo "${{ matrix.target }}" | sed s/_via.*//)"
+              mkdir -p "$OUTDIR"
+              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" >& /dev/null || :
 
               PLATFORMIO_BUILD_FLAGS="-DRegulatory_Domain_ISM_2400" pio run -e ${{ matrix.target }}
-              OUTDIR=~/artifacts/firmware/FCC/`echo ${{ matrix.target }} | sed s/_via.*//`
-              mkdir -p $OUTDIR
-              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} $OUTDIR >& /dev/null || :
+              OUTDIR="$GITHUB_WORKSPACE/artifacts/firmware/FCC/$(echo "${{ matrix.target }}" | sed s/_via.*//)"
+              mkdir -p "$OUTDIR"
+              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" >& /dev/null || :
               ;;
             *)
-              # release build
+              # release build (single)
               PLATFORMIO_BUILD_FLAGS="-DRegulatory_Domain_FCC_915" pio run -e ${{ matrix.target }}
-              OUTDIR=~/artifacts/firmware/FCC/`echo ${{ matrix.target }} | sed s/_via.*//`
-              mkdir -p $OUTDIR
-              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} $OUTDIR >& /dev/null || :
+              OUTDIR="$GITHUB_WORKSPACE/artifacts/firmware/FCC/$(echo "${{ matrix.target }}" | sed s/_via.*//)"
+              mkdir -p "$OUTDIR"
+              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" >& /dev/null || :
               ;;
           esac
-          
-      - name: 保存固件
+
+          # Debug 输出：列出产物，便于调试上传问题
+          echo "=== Artifacts produced under $GITHUB_WORKSPACE/artifacts ==="
+          ls -la "$GITHUB_WORKSPACE/artifacts" || true
+          find "$GITHUB_WORKSPACE/artifacts" -type f -print || true
+
+      - name: 验证是否有产物可上传
+        run: |
+          if ! find "$GITHUB_WORKSPACE/artifacts" -type f -print -quit >/dev/null; then
+            echo "❌ No artifacts found to upload (failing early)"
+            ls -la "$GITHUB_WORKSPACE" || true
+            exit 1
+          fi
+
+      - name: 保存固件 (上传 artifact per-matrix)
         uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: ~/artifacts/**/*
-        continue-on-error: true
+          # 使用 matrix target 作为 artifact 名称以避免覆盖
+          name: firmware-${{ matrix.target }}
+          path: ${{ github.workspace }}/artifacts/**/*
+        # 不要使用 continue-on-error: true — 上传失败应当让 job 失败以便发现问题
 
   firmware:
     needs: [check_release, targets, build]
@@ -193,22 +208,25 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 获取固件
+      - name: 获取固件（下载本次运行的所有 artifact）
         uses: actions/download-artifact@v4
         with:
-          name: firmware
           path: dist
 
-      - name: 创建固件目录结构
+      - name: 创建固件目录结构并复制产物
         run: |
-          mkdir -p releases/${{ needs.check_release.outputs.tag_name }}
-          cp -r dist/firmware releases/${{ needs.check_release.outputs.tag_name }}/ || true
+          TAG=${{ needs.check_release.outputs.tag_name }}
+          mkdir -p releases/${TAG}
+          # actions/download-artifact 会将每个 artifact 放到 dist/<artifact-name>/ 下，直接拷贝 dist/* 到 releases 下
+          cp -r dist/* releases/${TAG}/ || true
 
-      - name: 创建固件压缩包
+      - name: 打包固件为单个 zip 文件
         run: |
+          TAG=${{ needs.check_release.outputs.tag_name }}
           cd releases
-          zip -r -9 ../${{ needs.check_release.outputs.tag_name }}_firmware.zip ./${{ needs.check_release.outputs.tag_name }}
-      
+          # 确保压缩输出在工作区根，供后续 release 上传使用
+          zip -r -9 ../${TAG}_firmware.zip ./${TAG}
+
       - name: 提交并推送编译结果到仓库
         run: |
           git config --local user.email "action@github.com"
