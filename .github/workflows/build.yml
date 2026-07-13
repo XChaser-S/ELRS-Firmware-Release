@@ -84,13 +84,13 @@ jobs:
               grep '\[env:.*UART\]' src/targets/unified.ini || true
               grep -r '\[env:.*STLINK\]' src/targets/ | cut -d: -f2 || true
             } | \
-            sed 's/\[env://g' | \
-            sed 's/\]//g' | \
+            sed 's/.*\[env://g' | \
+            sed 's/\].*//g' | \
             grep -v '^$' | \
             sort -u | \
             awk 'BEGIN{ORS=""} NR==1{printf "[\"%s\"", $0} NR>1{printf ", \"%s\"", $0} END{print "]"}'
           )
-          
+                    
           echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
           
   build:
