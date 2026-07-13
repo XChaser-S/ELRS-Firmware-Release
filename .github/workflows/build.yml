@@ -78,7 +78,19 @@ jobs:
           ref: ${{ needs.check_release.outputs.tag_name }}
       - id: set-targets
         run: |
-          TARGETS=$(echo "[$(grep '\[env:.*UART\]' src/targets/unified.ini ; grep -r '\[env:.*STLINK\]' src/targets/ | cut -d: -f2) | sed 's/\[env://g' | sed 's/\]//g' | awk '{if (NF) print "\""$0"\""}' | paste -sd ',' - | sed 's/,/\",\"/g' | sed 's/^/[\"/' | sed 's/$/\"]/' | grep -v DEPRECATED)]")
+          # 提取所有 UART 和 STLINK 目标，清理格式后转换为 JSON 数组
+          TARGETS=$(
+            {
+              grep '\[env:.*UART\]' src/targets/unified.ini || true
+              grep -r '\[env:.*STLINK\]' src/targets/ | cut -d: -f2 || true
+            } | \
+            sed 's/\[env://g' | \
+            sed 's/\]//g' | \
+            grep -v '^$' | \
+            sort -u | \
+            awk 'BEGIN{ORS=""} NR==1{printf "[\"%s\"", $0} NR>1{printf ", \"%s\"", $0} END{print "]"}'
+          )
+          
           echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
           
   build:
