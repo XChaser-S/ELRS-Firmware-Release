@@ -118,7 +118,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.target }}
+          key: ${{ runner.os }}-pip-${{ github.run_id }}-${{ strategy.job-index }}
           
       - name: 安装 PlatformIO
         run: |
@@ -130,7 +130,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: ${{ runner.os }}-platformio
+          key: ${{ runner.os }}-platformio-${{ github.run_id }}
           
       - name: 编译固件
         run: |
