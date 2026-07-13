@@ -44,7 +44,7 @@ jobs:
           release = response.json()
           
           tag_name = release['tag_name']
-          os.system(f'echo "tag_name={tag_name}" >> $GITHUB_OUTPUT')
+          os.system(f'echo \"tag_name={tag_name}\" >> \$GITHUB_OUTPUT')
           
           release_date_str = release['published_at']
           release_date = datetime.strptime(release_date_str, '%Y-%m-%dT%H:%M:%SZ')
@@ -57,10 +57,10 @@ jobs:
 
           if elapsed_time <= timedelta(hours=24):
             print('最近24小时内有新的Release：', tag_name, '  即将开始编译最新版本固件！')
-            os.system('echo "has_new_version='true'" >> $GITHUB_OUTPUT')
+            os.system('echo \"has_new_version=true\" >> \$GITHUB_OUTPUT')
           else:
             print('最近24小时内没有新的Release，即将退出！(手动运行时请忽略)')
-            os.system('echo "has_new_version='false'" >> $GITHUB_OUTPUT')
+            os.system('echo \"has_new_version=false\" >> \$GITHUB_OUTPUT')
           "
 
   targets:
@@ -77,7 +77,9 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.check_release.outputs.tag_name }}
       - id: set-targets
-        run: echo "targets=[$( (grep '\[env:.*UART\]' src/targets/unified.ini ; grep -r '\[env:.*STLINK\]' src/targets/) | sed 's/.*://' | sed s/.$// | egrep "(STLINK|UART)" | grep -v DEPRECATED | tr '\n' ','  | sed 's/,$/"\n/' | sed 's/,/","/'g | sed 's/^/"/')]" >> $GITHUB_OUTPUT
+        run: |
+          TARGETS=$(echo "[$(grep '\[env:.*UART\]' src/targets/unified.ini ; grep -r '\[env:.*STLINK\]' src/targets/ | cut -d: -f2) | sed 's/\[env://g' | sed 's/\]//g' | awk '{if (NF) print "\""$0"\""}' | paste -sd ',' - | sed 's/,/\",\"/g' | sed 's/^/[\"/' | sed 's/$/\"]/' | grep -v DEPRECATED)]")
+          echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
           
   build:
     needs: [check_release, targets]
@@ -157,12 +159,10 @@ jobs:
     needs: [check_release, targets, build]
     runs-on: ubuntu-latest
     steps:
-      - name: 下载最新 ELRS 代码
+      - name: 下载此仓库代码
         uses: actions/checkout@v4
         with:
-          repository: ExpressLRS/ExpressLRS
-          fetch-depth: 0
-          ref: ${{ needs.check_release.outputs.tag_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 获取固件
         uses: actions/download-artifact@v3
@@ -170,51 +170,35 @@ jobs:
           name: firmware
           path: dist
 
-      - name: 获取硬件目录
-        uses: actions/checkout@v4
-        with:
-          repository: ExpressLRS/targets
-          fetch-depth: 0
-          path: src/hardware
-
-      - name: 复制硬件配置文件到文件夹
-        run: cp -r src/hardware dist/firmware
-
-      - name: 复制 Lua 脚本到文件夹
+      - name: 创建固件目录结构
         run: |
-          mkdir -p dist/firmware/lua
-          cp -r src/lua/elrsV3.lua dist/firmware/lua
-
-      - name: 复制 bootloader 到文件夹
-        run: cd src ; find bootloader -name \*.bin -o -name \*.frk | grep -v src/ | cpio -pdm ../dist/firmware
-
-      - name: 设置 Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: 用 shiv 编译挂件刷写进制文件
-        run: |
-          cd src/python
-          pip install shiv
-          shiv -c flash -o ../../dist/firmware/flasher.pyz pyserial .
-      
-      - name: 上传固件到 artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: firmware
-          path: dist/**/*
+          mkdir -p releases/${{ needs.check_release.outputs.tag_name }}
+          cp -r dist/firmware releases/${{ needs.check_release.outputs.tag_name }}/ || true
 
       - name: 创建固件压缩包
         run: |
-          cd dist
-          mkdir ./${{ needs.check_release.outputs.tag_name }}
-          cp -r ./firmware ./${{ needs.check_release.outputs.tag_name }}
-          zip -r -9 ../firmware.zip ./${{ needs.check_release.outputs.tag_name }}
+          cd releases
+          zip -r -9 ../${{ needs.check_release.outputs.tag_name }}_firmware.zip ./${{ needs.check_release.outputs.tag_name }}
       
-      - name: 上传固件到 release
-        uses: svenstaro/upload-release-action@v2
+      - name: 提交并推送编译结果到仓库
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          mkdir -p releases_archive
+          mv ${{ needs.check_release.outputs.tag_name }}_firmware.zip releases_archive/ || true
+          git add releases_archive/
+          git commit -m "Add firmware release: ${{ needs.check_release.outputs.tag_name }}" --allow-empty || true
+          git push origin main || git push origin master || true
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
-          file: firmware.zip
-          tag: ${{ needs.check_release.outputs.tag_name }}
-          overwrite: true
+          tag_name: ${{ needs.check_release.outputs.tag_name }}
+          files: |
+            ${{ needs.check_release.outputs.tag_name }}_firmware.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
