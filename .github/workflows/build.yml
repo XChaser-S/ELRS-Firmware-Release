@@ -216,6 +216,9 @@ jobs:
   firmware:
     needs: [check_release, targets, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
     steps:
       - name: 下载此仓库代码
         uses: actions/checkout@v4
@@ -255,11 +258,9 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.check_release.outputs.tag_name }}
-          files: |
-            ${{ needs.check_release.outputs.tag_name }}_firmware.zip
+          files: releases_archive/${{ needs.check_release.outputs.tag_name }}_firmware.zip  # ← 修改这行
           generate_release_notes: true
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
