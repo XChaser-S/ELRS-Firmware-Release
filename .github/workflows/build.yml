@@ -222,10 +222,13 @@ jobs:
           # 使用 matrix target 作为 artifact 名称以避免覆盖
           name: firmware-${{ matrix.target }}
           path: ${{ github.workspace }}/artifacts/**/*
+          if-no-files-found: ignore
+        continue-on-error: true
         # 不要使用 continue-on-error: true — 上传失败应当让 job 失败以便发现问题
 
   firmware:
     needs: [check_release, targets, build]
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: write
