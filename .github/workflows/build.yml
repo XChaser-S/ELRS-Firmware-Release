@@ -148,12 +148,26 @@ jobs:
           platformio pkg install --platform native
           platformio pkg update
 
-          # 验证目标环境是否有效
-          VALID_TARGETS=$(platformio env list | grep -v '^\[' | awk '{print $1}' | tr '\n' '|' | sed 's/|$//')
+          # 获取 PlatformIO 可用的 env 列表（支持多种 platformio/pio 版本的回退）
+          VALID_OUTPUT="$( (command -v pio >/dev/null 2>&1 && pio env list) \
+            || (platformio project env list 2>/dev/null) \
+            || (platformio env list 2>/dev/null) )" || true
           
-          if ! echo "${{ matrix.target }}" | grep -qE "^($VALID_TARGETS)$"; then
-            echo "⚠️  跳过无效的环境: ${{ matrix.target }}"
-            exit 0
+          # 处理输出，提取 env 名称为 | 分隔形式
+          VALID_TARGETS="$(echo "$VALID_OUTPUT" | grep -v '^\[' | awk '{print $1}' | tr '\n' '|' | sed 's/|$//')"
+          
+          echo "PlatformIO env list raw:"
+          echo "$VALID_OUTPUT"
+          echo "Parsed valid targets: $VALID_TARGETS"
+          
+          # 如果解析为空则记录警告但不要盲目退出（防止误跳过），改为继续构建并让 pio run 决定是否成功
+          if [ -z "$VALID_TARGETS" ]; then
+            echo "⚠️ Could not detect PlatformIO envs — skipping pre-check and proceeding to build (build step will fail if env invalid)"
+          else
+            if ! echo "${{ matrix.target }}" | grep -qE "^($VALID_TARGETS)$"; then
+              echo "⚠️  跳过无效的环境: ${{ matrix.target }}"
+              exit 0
+            fi
           fi
           
           case ${{matrix.target}} in
