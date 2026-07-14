@@ -1,5 +1,3 @@
-name: 编译最新正式版ELRS固件
-
 on:
   schedule:
     - cron: '0 0 * * *' # 第一次每天 UTC 时间 0:00 运行，即北京时间早上 8:00
@@ -156,9 +154,13 @@ jobs:
           # 使用工作区路径保存产物，避免 ~ 展开问题
           mkdir -p "$GITHUB_WORKSPACE/artifacts/firmware"
           cd src
+          
+          # 清理旧的编译输出以避免链接器错误
+          rm -rf .pio/build .pio/libdeps
+          
           platformio pkg install --platform native
-          platformio pkg update
-
+          platformio pkg update --no-save
+          
           # 获取 PlatformIO 可用的 env 列表（支持多种 platformio/pio 版本的回退）
           VALID_OUTPUT="$( (command -v pio >/dev/null 2>&1 && pio env list) \
             || (platformio project env list 2>/dev/null) \
@@ -187,19 +189,19 @@ jobs:
               PLATFORMIO_BUILD_FLAGS="-DRegulatory_Domain_EU_CE_2400" pio run -e ${{ matrix.target }}
               OUTDIR="$GITHUB_WORKSPACE/artifacts/firmware/LBT/$(echo "${{ matrix.target }}" | sed s/_via.*//)"
               mkdir -p "$OUTDIR"
-              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" >& /dev/null || :
+              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" 2>/dev/null || { echo "⚠️ Warning: LBT build artifacts not found"; }
 
               PLATFORMIO_BUILD_FLAGS="-DRegulatory_Domain_ISM_2400" pio run -e ${{ matrix.target }}
               OUTDIR="$GITHUB_WORKSPACE/artifacts/firmware/FCC/$(echo "${{ matrix.target }}" | sed s/_via.*//)"
               mkdir -p "$OUTDIR"
-              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" >& /dev/null || :
+              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" 2>/dev/null || { echo "⚠️ Warning: FCC build artifacts not found"; }
               ;;
             *)
               # release build (single)
               PLATFORMIO_BUILD_FLAGS="-DRegulatory_Domain_FCC_915" pio run -e ${{ matrix.target }}
               OUTDIR="$GITHUB_WORKSPACE/artifacts/firmware/FCC/$(echo "${{ matrix.target }}" | sed s/_via.*//)"
               mkdir -p "$OUTDIR"
-              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" >& /dev/null || :
+              mv .pio/build/${{ matrix.target }}/*.{elrs,bin,elf,map} "$OUTDIR" 2>/dev/null || { echo "⚠️ Warning: Build artifacts not found"; }
               ;;
           esac
 
@@ -210,11 +212,12 @@ jobs:
 
       - name: 验证是否有产物可上传
         run: |
-          if ! find "$GITHUB_WORKSPACE/artifacts" -type f -print -quit >/dev/null; then
+          if ! find "$GITHUB_WORKSPACE/artifacts" -type f -print -quit >/dev/null 2>&1; then
             echo "❌ No artifacts found to upload (failing early)"
             ls -la "$GITHUB_WORKSPACE" || true
             exit 1
           fi
+          echo "✅ Found build artifacts, proceeding to upload"
 
       - name: 保存固件 (上传 artifact per-matrix)
         uses: actions/upload-artifact@v4
@@ -222,9 +225,7 @@ jobs:
           # 使用 matrix target 作为 artifact 名称以避免覆盖
           name: firmware-${{ matrix.target }}
           path: ${{ github.workspace }}/artifacts/**/*
-          if-no-files-found: ignore
-        continue-on-error: true
-        # 不要使用 continue-on-error: true — 上传失败应当让 job 失败以便发现问题
+          if-no-files-found: warn
 
   firmware:
     needs: [check_release, targets, build]
@@ -246,6 +247,15 @@ jobs:
         with:
           path: dist
 
+      - name: 检查是否有编译产物
+        run: |
+          if [ ! -d "dist" ] || [ -z "$(find dist -type f -name '*.bin' -o -name '*.elrs' 2>/dev/null)" ]; then
+            echo "❌ 没有发现任何编译产物，停止打包"
+            find dist -type f 2>/dev/null | head -20 || echo "dist 目录为空"
+            exit 1
+          fi
+          echo "✅ 找到编译产物，继续处理"
+
       - name: 获取硬件目录
         uses: actions/checkout@v4
         with:
@@ -254,15 +264,34 @@ jobs:
           path: src/hardware
 
       - name: 复制硬件配置文件到文件夹
-        run: cp -r src/hardware dist/firmware
+        run: |
+          mkdir -p dist/firmware
+          cp -r src/hardware/* dist/firmware/ || true
 
       - name: 复制 Lua 脚本到文件夹
         run: |
           mkdir -p dist/firmware/lua
-          cp -r src/lua/elrsV3.lua dist/firmware/lua
+          cp -r src/lua/elrsV3.lua dist/firmware/lua/ || true
 
       - name: 复制 bootloader 到文件夹
-        run: cd src ; find bootloader -name \*.bin -o -name \*.frk | grep -v src/ | cpio -pdm ../dist/firmware
+        run: |
+          if [ -d "src/bootloader" ]; then
+            cd src
+            find bootloader -name \*.bin -o -name \*.frk | grep -v src/ | cpio -pdm ../dist/firmware 2>/dev/null || true
+          fi
+
+      - name: 合并所有固件到单一目录
+        run: |
+          # 将所有 firmware-* artifact 的内容合并到 dist/firmware
+          for dir in dist/firmware-*; do
+            if [ -d "$dir" ]; then
+              echo "Merging $dir into dist/firmware"
+              cp -r "$dir"/* dist/firmware/ 2>/dev/null || true
+            fi
+          done
+          
+          echo "✅ Final firmware structure:"
+          find dist/firmware -type f | head -30
 
       - name: 设置 Python
         uses: actions/setup-python@v5
@@ -273,13 +302,14 @@ jobs:
         run: |
           cd src/python
           pip install shiv
-          shiv -c flash -o ../../dist/firmware/flasher.pyz pyserial .
+          shiv -c flash -o ../../dist/firmware/flasher.pyz pyserial . 2>/dev/null || echo "⚠️ Warning: flasher.pyz build skipped"
       
       - name: 上传固件到 artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-complete
           path: dist/**/*
+          if-no-files-found: warn
 
       - name: 下载此仓库代码
         uses: actions/checkout@v4
@@ -289,9 +319,18 @@ jobs:
       - name: 创建固件压缩包
         run: |
           mkdir -p releases/${{ needs.check_release.outputs.tag_name }}
+          
+          # 确保 dist/firmware 存在且不为空
+          if [ ! -d "dist/firmware" ] || [ -z "$(find dist/firmware -type f 2>/dev/null)" ]; then
+            echo "❌ dist/firmware 为空，无法创建压缩包"
+            find dist -type f | head -20
+            exit 1
+          fi
+          
           cp -r dist/firmware releases/${{ needs.check_release.outputs.tag_name }}/
           cd releases
           zip -r -9 ../${{ needs.check_release.outputs.tag_name }}_firmware.zip ./${{ needs.check_release.outputs.tag_name }}
+          ls -lh ../${{ needs.check_release.outputs.tag_name }}_firmware.zip
       
       - name: 提交并推送编译结果到仓库
         run: |
