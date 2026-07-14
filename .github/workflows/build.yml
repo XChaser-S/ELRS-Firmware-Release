@@ -311,33 +311,35 @@ jobs:
           path: dist/**/*
           if-no-files-found: warn
 
-      - name: 下载此仓库代码
+      - name: 下载此仓库代码 (用于提交发布文件)
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          path: repo
 
       - name: 创建固件压缩包
         run: |
           mkdir -p releases/${{ needs.check_release.outputs.tag_name }}
-          
           # 确保 dist/firmware 存在且不为空
           if [ ! -d "dist/firmware" ] || [ -z "$(find dist/firmware -type f 2>/dev/null)" ]; then
             echo "❌ dist/firmware 为空，无法创建压缩包"
             find dist -type f | head -20
             exit 1
           fi
-          
           cp -r dist/firmware releases/${{ needs.check_release.outputs.tag_name }}/
           cd releases
           zip -r -9 ../${{ needs.check_release.outputs.tag_name }}_firmware.zip ./${{ needs.check_release.outputs.tag_name }}
           ls -lh ../${{ needs.check_release.outputs.tag_name }}_firmware.zip
-      
+
       - name: 提交并推送编译结果到仓库
         run: |
+          # 在 repo 目录执行 git 操作，避免覆盖 workspace 根目录
+          cd repo
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           mkdir -p releases_archive
-          mv ${{ needs.check_release.outputs.tag_name }}_firmware.zip releases_archive/ || true
+          # 将 zip 从 workflow 根目录移动到 repo 下
+          mv ../${{ needs.check_release.outputs.tag_name }}_firmware.zip releases_archive/ || true
           git add releases_archive/
           git commit -m "Add firmware release: ${{ needs.check_release.outputs.tag_name }}" --allow-empty || true
           git push origin main || git push origin master || true
@@ -346,7 +348,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.check_release.outputs.tag_name }}
-          files: releases_archive/${{ needs.check_release.outputs.tag_name }}_firmware.zip
+          files: repo/releases_archive/${{ needs.check_release.outputs.tag_name }}_firmware.zip
           generate_release_notes: true
           draft: false
           prerelease: false
